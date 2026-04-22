@@ -23,14 +23,26 @@ SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON", "/etc/secrets/credentials.json")
 
-SHEET_MASTER = "Мастер"
-SHEET_LOG    = "Лог платежей"
+SHEET_MASTER  = "Мастер (объединённая)"
+SHEET_REESTR  = "Реестр договоров"
+SHEET_LOG     = "Лог платежей"
 
-# Индексы столбцов в Мастер (1-based → 0-based для gspread)
-COL_NUM_DOG  = 1   # B - Номер договора
-COL_OPLACH   = 12  # M - Оплачено (всего)
-COL_STATUS   = 14  # O - Статус оплаты
-COL_DATE_OPL = 16  # Q - Дата оплаты факт
+# Индексы столбцов в "Мастер (объединённая)" (1-based)
+# Группа ПЛАН: col1=№ПЗ, col2=Департамент ... col10=Плановая сумма
+# Группа ДОГОВОР: col13=№договора, col14=Поставщик ... col21=Экономия
+# Группа ДС: col22-24
+# Группа ОПЛАТА: col25=Оплачено, col26=Остаток, col27=Статус, col28=Дата оплаты, col29=Обеспечение
+COL_NUM_DOG  = 13  # M - Номер договора
+COL_SUM_DOG  = 18  # R - Сумма без НДС (для расчёта остатка)
+COL_OPLACH   = 25  # Y - Оплачено (всего)
+COL_STATUS   = 27  # AA - Статус оплаты
+COL_DATE_OPL = 28  # AB - Дата оплаты факт
+
+# Индексы в "Реестр договоров"
+COL_REG_NUM  = 2   # B - Номер договора
+COL_REG_SUM  = 10  # J - Сумма без НДС
+COL_REG_PAID = 13  # M - Оплачено
+COL_REG_STAT = 20  # T - Статус оплаты
 
 # ── GOOGLE SHEETS ────────────────────────────────────────────────────────────
 def get_sheets_client():
@@ -46,50 +58,52 @@ def get_master_sheet():
     sh = gc.open_by_key(SPREADSHEET_ID)
     return sh.worksheet(SHEET_MASTER)
 
+def get_reestr_sheet():
+    gc = get_sheets_client()
+    sh = gc.open_by_key(SPREADSHEET_ID)
+    return sh.worksheet(SHEET_REESTR)
+
 def get_log_sheet():
     gc = get_sheets_client()
     sh = gc.open_by_key(SPREADSHEET_ID)
     return sh.worksheet(SHEET_LOG)
 
+def normalize(s: str) -> str:
+    """Нормализует строку — заменяет кириллические буквы на латинские для сравнения."""
+    return s.strip().upper().replace('А', 'A').replace('В', 'B').replace('С', 'C').replace('Е', 'E').replace('О', 'O').replace('Р', 'P').replace('Х', 'X')
+
 def find_contract_row(ws, num_dog: str) -> int | None:
     """Ищет строку по номеру договора. Возвращает номер строки (1-based) или None."""
-    num_dog = num_dog.strip()
+    num_dog_norm = normalize(num_dog)
     col_values = ws.col_values(COL_NUM_DOG)
+    # Точное совпадение с нормализацией
     for i, val in enumerate(col_values):
-        if val and val.strip() == num_dog:
+        if val and normalize(val) == num_dog_norm:
             return i + 1
     # Нечёткий поиск — ищем по части номера
-    short = num_dog.replace('АGP/', '').replace('AGP/', '')
+    short = num_dog_norm.replace('AGP/', '').replace('AGP\\', '')
     for i, val in enumerate(col_values):
-        if val and short in val:
+        if val and short in normalize(val):
             return i + 1
     return None
 
 def update_payment(ws, row: int, amount: float, pay_date: str):
-    """Обновляет оплату в строке Мастер-таблицы."""
-    # Читаем текущее значение оплачено
+    """Обновляет оплату в Мастер (объединённая)."""
     current = ws.cell(row, COL_OPLACH).value
     try:
         current_val = float(str(current).replace(' ', '').replace(',', '.')) if current else 0
     except:
         current_val = 0
-
     new_val = current_val + amount
 
-    # Читаем сумму договора для определения статуса
-    summa_str = ws.cell(row, 10).value  # Сумма без НДС (колонка J)
+    summa_str = ws.cell(row, COL_SUM_DOG).value
     try:
         summa = float(str(summa_str).replace(' ', '').replace(',', '.')) if summa_str else 0
     except:
         summa = 0
 
     if summa > 0:
-        if new_val >= summa * 0.999:
-            status = "Оплачено"
-        elif new_val > 0:
-            status = "Частично"
-        else:
-            status = "Ожидается"
+        status = "Оплачено" if new_val >= summa * 0.999 else ("Частично" if new_val > 0 else "Ожидается")
     else:
         status = "Частично" if new_val > 0 else "Ожидается"
 
@@ -97,6 +111,36 @@ def update_payment(ws, row: int, amount: float, pay_date: str):
     ws.update_cell(row, COL_STATUS, status)
     if pay_date:
         ws.update_cell(row, COL_DATE_OPL, pay_date)
+
+def update_payment_reestr(num_dog: str, amount: float, pay_date: str):
+    """Параллельно обновляет оплату в листе Реестр договоров."""
+    try:
+        ws = get_reestr_sheet()
+        col_vals = ws.col_values(COL_REG_NUM)
+        row = None
+        num_norm = normalize(num_dog)
+        for i, val in enumerate(col_vals):
+            if val and normalize(val) == num_norm:
+                row = i + 1
+                break
+        if not row:
+            return
+        current = ws.cell(row, COL_REG_PAID).value
+        try:
+            current_val = float(str(current).replace(' ', '').replace(',', '.')) if current else 0
+        except:
+            current_val = 0
+        new_val = current_val + amount
+        summa_str = ws.cell(row, COL_REG_SUM).value
+        try:
+            summa = float(str(summa_str).replace(' ', '').replace(',', '.')) if summa_str else 0
+        except:
+            summa = 0
+        status = "Оплачено" if (summa > 0 and new_val >= summa * 0.999) else ("Частично" if new_val > 0 else "Ожидается")
+        ws.update_cell(row, COL_REG_PAID, new_val)
+        ws.update_cell(row, COL_REG_STAT, status)
+    except Exception as e:
+        logger.warning(f"Не удалось обновить Реестр: {e}")
 
 def log_payment(num_dog: str, amount: float, pay_date: str, source: str, comment: str = ""):
     """Записывает платёж в лог."""
@@ -203,8 +247,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📷 Скиньте фото платёжки — я считаю данные и внесу\n"
         "📊 /report — сводка по договорам\n"
         "🔍 /find [номер] — найти договор\n"
-        "⚠️ /expiring — договора истекающие через 30 дней"
+        "⚠️ /expiring — договора истекающие через 30 дней\n"
+        "🔄 /sync — инструкция как обновить ваш Excel файл"
     )
+
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update): return
+    sid = SPREADSHEET_ID or "SPREADSHEET_ID"
+    url_master = f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&sheet=Мастер (объединённая)"
+    url_reestr  = f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&sheet=Реестр договоров"
+    text = (
+        "🔄 *Как обновить ваш Excel файл*\n\n"
+        "Данные автоматически обновляются в Google Sheets после каждого платежа.\n\n"
+        "Чтобы подтянуть данные в ваш Excel:\n\n"
+        "*Первый раз (настройка один раз):*\n"
+        "1. Откройте ваш Excel\n"
+        "2. Данные → Получить данные → Из интернета\n"
+        "3. Вставьте ссылку для нужного листа (см. ниже)\n"
+        "4. Нажмите Загрузить → Преобразовать данные\n"
+        "5. В Power Query: Закрыть и загрузить\n\n"
+        "*Каждый раз после обновления:*\n"
+        "Данные → Обновить все (или Ctrl+Alt+F5)\n\n"
+        "*Ссылки для Power Query:*\n\n"
+        f"Объединённая таблица:\n`{url_master}`\n\n"
+        f"Реестр договоров:\n`{url_reestr}`"
+    )
+    await update.message.reply_text(text, parse_mode='Markdown')
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update): return
@@ -330,6 +398,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row_num = find_contract_row(ws, p['num_dog'])
             if row_num:
                 update_payment(ws, row_num, p['summa'], p['data'])
+                update_payment_reestr(p['num_dog'], p['summa'], p['data'])
                 log_payment(p['num_dog'], p['summa'], p['data'], 'Excel выгрузка')
                 updated.append(p['num_dog'])
             else:
@@ -426,6 +495,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 ws = get_master_sheet()
                 update_payment(ws, p['row_num'], p['summa'], p['data'])
+                update_payment_reestr(p['num_dog'], p['summa'], p['data'])
                 log_payment(p['num_dog'], p['summa'], p['data'], 'Фото платёжки')
                 await update.message.reply_text(
                     f"✅ Готово! Оплата внесена:\n"
@@ -446,7 +516,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📷 Фото платёжки\n"
         "📊 /report — сводка\n"
         "🔍 /find [номер] — найти договор\n"
-        "⚠️ /expiring — истекающие договора"
+        "⚠️ /expiring — истекающие договора\n"
+        "🔄 /sync — как обновить ваш Excel"
     )
 
 # ── ЗАПУСК ───────────────────────────────────────────────────────────────────
@@ -456,6 +527,7 @@ def main():
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("expiring", cmd_expiring))
     app.add_handler(CommandHandler("find", cmd_find))
+    app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
