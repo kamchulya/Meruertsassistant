@@ -21,7 +21,7 @@ TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN")
 ALLOWED_CHAT_ID   = int(os.getenv("ALLOWED_CHAT_ID"))   # chat_id Меруерт
 SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")      # путь к JSON файлу
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON", "/etc/secrets/credentials.json")
 
 SHEET_MASTER = "Мастер"
 SHEET_LOG    = "Лог платежей"
