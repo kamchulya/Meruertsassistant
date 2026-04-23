@@ -18,7 +18,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID"))
+ALLOWED_CHAT_IDS = {
+    int(x.strip())
+    for x in os.getenv("ALLOWED_CHAT_IDS", os.getenv("ALLOWED_CHAT_ID", "")).split(",")
+    if x.strip()
+}
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON", "/etc/secrets/credentials.json")
@@ -355,7 +359,7 @@ def extract_payments_from_excel(file_bytes: bytes, filename: str = "") -> list[d
 
 
 def is_allowed(update: Update) -> bool:
-    return update.effective_chat.id == ALLOWED_CHAT_ID
+    return update.effective_chat.id in ALLOWED_CHAT_IDS
 
 
 
